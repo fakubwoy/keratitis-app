@@ -311,8 +311,8 @@
     <p class="hero-eyebrow">Slit-lamp Image Analysis</p>
     <h1 class="hero-title">Corneal ulcer<br><em>classified in seconds</em></h1>
     <p class="hero-desc">
-      Upload a slit-lamp image. The model identifies bacterial, fungal, or viral keratitis,
-      maps attention with GradCAM++, and estimates severity — all in one pass.
+      Upload a slit-lamp image. The model classifies the corneal ulcer pattern as
+      Point-like, Point-Flaky, or Flaky, maps attention with GradCAM++, and estimates severity — all in one pass.
     </p>
   </section>
 
@@ -410,7 +410,7 @@
   <div class="wrap">
     <p>
       ⚠ Research prototype only. Not validated for clinical use. Do not use for diagnosis.<br>
-      MobileNetV2 · GradCAM++ · SUSTech-SYSU dataset · 3-class keratitis classification
+      MobileNetV2 · GradCAM++ · SUSTech-SYSU dataset · 3-class corneal ulcer pattern classification
     </p>
   </div>
 </footer>
@@ -539,10 +539,10 @@ function renderResults(d) {
     flag = '✓ Mild presentation. Routine follow-up advised. Re-evaluate if symptoms worsen.';
     flagClass = 'mild-flag';
   }
-  if (d.predicted_class === 'fungal')
-    flag += '\n\nFungal keratitis suspected — antifungal therapy may be indicated.';
-  else if (d.predicted_class === 'bacterial')
-    flag += '\n\nBacterial keratitis suspected — antibiotic therapy may be indicated.';
+  if (d.predicted_class === 'Flaky')
+    flag += '\n\nFlaky pattern detected — large confluent ulcer. Prompt specialist review advised.';
+  else if (d.predicted_class === 'Point-Flaky')
+    flag += '\n\nMixed point-flaky pattern — monitor progression closely.';
 
   flagText.style.whiteSpace = 'pre-line';
   flagText.textContent = flag;
