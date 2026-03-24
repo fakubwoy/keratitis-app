@@ -3,13 +3,11 @@ import numpy as np
 from PIL import Image
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.models as models
 import torchvision.transforms as T
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
-from pytorch_grad_cam import GradCAMPlusPlus
-from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
-from pytorch_grad_cam.utils.image import show_cam_on_image
 
 app = Flask(__name__)
 CORS(app)
@@ -30,7 +28,6 @@ def build_mobilenet(num_classes):
 classifier = build_mobilenet(NUM_CLASSES)
 
 ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
-# handle both raw state_dict and wrapped checkpoint
 if 'model_state_dict' in ckpt:
     classifier.load_state_dict(ckpt['model_state_dict'])
     saved_classes = ckpt.get('class_names', CLASS_NAMES)
@@ -41,9 +38,67 @@ else:
 
 classifier.to(DEVICE).eval()
 
-# ── GradCAM++ ─────────────────────────────────────────────────────────────────
-target_layer = [classifier.features[-1][0]]
-cam = GradCAMPlusPlus(model=classifier, target_layers=target_layer)
+# ── GradCAM++ (pure PyTorch, no opencv) ───────────────────────────────────────
+def gradcam_plusplus(model, tensor, target_idx):
+    """Returns a (H, W) numpy heatmap in [0,1]."""
+    features, grads = {}, {}
+
+    target_layer = model.features[-1][0]
+
+    def fwd_hook(m, inp, out):
+        features['act'] = out
+
+    def bwd_hook(m, gin, gout):
+        grads['act'] = gout[0]
+
+    fh = target_layer.register_forward_hook(fwd_hook)
+    bh = target_layer.register_full_backward_hook(bwd_hook)
+
+    output = model(tensor)
+    model.zero_grad()
+    output[0, target_idx].backward()
+
+    fh.remove()
+    bh.remove()
+
+    A  = features['act'][0]          # (C, H, W)
+    dY = grads['act'][0]             # (C, H, W)
+
+    # GradCAM++ alpha weights
+    dY2 = dY ** 2
+    dY3 = dY ** 3
+    sum_A = A.sum(dim=(1, 2), keepdim=True)
+    alpha = dY2 / (2 * dY2 + sum_A * dY3 + 1e-7)
+    alpha = torch.where(dY > 0, alpha, torch.zeros_like(alpha))
+
+    weights = (alpha * F.relu(dY)).sum(dim=(1, 2))   # (C,)
+    cam = (weights[:, None, None] * A).sum(dim=0)     # (H, W)
+    cam = F.relu(cam)
+
+    # Normalise to [0, 1]
+    cam = cam - cam.min()
+    cam = cam / (cam.max() + 1e-7)
+
+    # Upsample to IMG_SIZE x IMG_SIZE
+    cam_up = F.interpolate(
+        cam.unsqueeze(0).unsqueeze(0),
+        size=(IMG_SIZE, IMG_SIZE),
+        mode='bilinear', align_corners=False
+    )[0, 0]
+
+    return cam_up.detach().cpu().numpy()
+
+
+def apply_heatmap(rgb_np, cam):
+    """Overlay jet colormap heatmap on rgb image (both float32 [0,1])."""
+    # Jet colormap approximation using pure numpy
+    r = np.clip(1.5 - np.abs(4 * cam - 3), 0, 1)
+    g = np.clip(1.5 - np.abs(4 * cam - 2), 0, 1)
+    b = np.clip(1.5 - np.abs(4 * cam - 1), 0, 1)
+    heatmap = np.stack([r, g, b], axis=-1)
+    overlay = 0.5 * rgb_np + 0.5 * heatmap
+    return (np.clip(overlay, 0, 1) * 255).astype(np.uint8)
+
 
 # ── Transforms ────────────────────────────────────────────────────────────────
 val_tfm = T.Compose([
@@ -58,21 +113,21 @@ def predict(pil_img, threshold=0.45):
     pil_img = pil_img.convert('RGB').resize((IMG_SIZE, IMG_SIZE))
     raw_np  = np.array(pil_img) / 255.0
     tensor  = val_tfm(pil_img).unsqueeze(0).to(DEVICE)
+    tensor.requires_grad_(True)
 
     with torch.no_grad():
         logits = classifier(tensor)
         probs  = torch.softmax(logits, dim=1).squeeze().cpu().numpy()
 
-    pred_idx   = int(probs.argmax())
-    confidence = float(probs.max())
+    pred_idx    = int(probs.argmax())
+    confidence  = float(probs.max())
     class_probs = {CLASS_NAMES[i]: round(float(probs[i]), 4) for i in range(NUM_CLASSES)}
 
-    # GradCAM++
-    cam_tensor = tensor.detach().requires_grad_(True)
-    with torch.enable_grad():
-        grayscale_cam = cam(input_tensor=cam_tensor,
-                            targets=[ClassifierOutputTarget(pred_idx)])[0]
-    overlay = show_cam_on_image(raw_np.astype(np.float32), grayscale_cam, use_rgb=True)
+    # GradCAM++ (needs grad)
+    tensor2 = val_tfm(pil_img).unsqueeze(0).to(DEVICE)
+    grayscale_cam = gradcam_plusplus(classifier, tensor2, pred_idx)
+
+    overlay = apply_heatmap(raw_np.astype(np.float32), grayscale_cam)
 
     # Pseudo-segmentation
     mask   = (grayscale_cam > threshold).astype(np.uint8)
