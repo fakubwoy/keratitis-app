@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Keratitis AI — Corneal Ulcer Classifier</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0a0a0f;
+    --surface:   #111118;
+    --border:    #1e1e2e;
+    --accent:    #00e5bf;
+    --accent2:   #ff6b6b;
+    --accent3:   #ffd93d;
+    --text:      #e8e8f0;
+    --muted:     #5a5a7a;
+    --mild:      #00e5bf;
+    --moderate:  #ffd93d;
+    --severe:    #ff6b6b;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* grid background */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 48px 48px;
+    opacity: 0.4;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .wrap { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+
+  /* ── Header ── */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 20px 0;
+  }
+  .header-inner {
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .logo {
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  .logo-mark {
+    font-family: 'Instrument Serif', serif;
+    font-size: 22px;
+    color: var(--accent);
+    letter-spacing: -0.5px;
+  }
+  .logo-sub {
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .badge {
+    font-size: 10px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    color: var(--muted);
+    letter-spacing: 1px;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    padding: 72px 0 48px;
+    text-align: center;
+  }
+  .hero-eyebrow {
+    font-size: 10px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 20px;
+  }
+  .hero-title {
+    font-family: 'Instrument Serif', serif;
+    font-size: clamp(42px, 6vw, 72px);
+    line-height: 1.05;
+    letter-spacing: -1px;
+    margin-bottom: 20px;
+  }
+  .hero-title em { font-style: italic; color: var(--accent); }
+  .hero-desc {
+    font-size: 13px;
+    color: var(--muted);
+    max-width: 480px;
+    margin: 0 auto;
+    line-height: 1.8;
+  }
+
+  /* ── Upload zone ── */
+  .upload-section { padding: 0 0 56px; }
+
+  .drop-zone {
+    border: 1.5px dashed var(--border);
+    border-radius: 12px;
+    padding: 56px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+    background: var(--surface);
+  }
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(0,229,191,0.03);
+  }
+  .drop-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .drop-icon {
+    font-size: 40px; margin-bottom: 16px; display: block;
+    filter: grayscale(1); transition: filter 0.2s;
+  }
+  .drop-zone:hover .drop-icon { filter: none; }
+  .drop-title { font-size: 14px; color: var(--text); margin-bottom: 6px; }
+  .drop-sub   { font-size: 11px; color: var(--muted); }
+
+  .preview-wrap {
+    display: none;
+    margin-top: 20px;
+    position: relative;
+    border-radius: 8px;
+    overflow: hidden;
+    max-height: 280px;
+  }
+  .preview-wrap img { width: 100%; object-fit: cover; display: block; }
+  .preview-remove {
+    position: absolute; top: 10px; right: 10px;
+    background: rgba(0,0,0,0.7); border: none; color: white;
+    border-radius: 50%; width: 28px; height: 28px; cursor: pointer;
+    font-size: 14px; display: flex; align-items: center; justify-content: center;
+  }
+
+  .btn-analyse {
+    display: block; width: 100%; margin-top: 16px;
+    padding: 15px;
+    background: var(--accent);
+    color: #000;
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 1px;
+    border: none; border-radius: 8px; cursor: pointer;
+    transition: opacity 0.2s, transform 0.15s;
+  }
+  .btn-analyse:hover { opacity: 0.88; transform: translateY(-1px); }
+  .btn-analyse:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+  /* ── Loading ── */
+  .loading {
+    display: none;
+    text-align: center;
+    padding: 48px 0;
+  }
+  .spinner {
+    width: 36px; height: 36px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 16px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading p { font-size: 12px; color: var(--muted); letter-spacing: 1px; }
+
+  /* ── Results ── */
+  .results { display: none; padding-bottom: 72px; }
+
+  .results-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  @media(max-width: 680px) { .results-grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+  }
+  .card-label {
+    font-size: 9px;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+
+  /* diagnosis card */
+  .diagnosis-name {
+    font-family: 'Instrument Serif', serif;
+    font-size: 38px;
+    letter-spacing: -1px;
+    line-height: 1;
+    margin-bottom: 8px;
+    text-transform: capitalize;
+  }
+  .diagnosis-conf {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 20px;
+  }
+  .severity-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 14px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .severity-pill.mild     { background: rgba(0,229,191,0.12); color: var(--mild);     border: 1px solid rgba(0,229,191,0.25); }
+  .severity-pill.moderate { background: rgba(255,217,61,0.12); color: var(--moderate); border: 1px solid rgba(255,217,61,0.25); }
+  .severity-pill.severe   { background: rgba(255,107,107,0.12); color: var(--severe);  border: 1px solid rgba(255,107,107,0.25); }
+
+  /* heatmap card */
+  .heatmap-card { grid-column: span 1; }
+  .heatmap-card img { width: 100%; border-radius: 6px; display: block; }
+
+  /* probs card */
+  .prob-row { margin-bottom: 12px; }
+  .prob-header { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 5px; }
+  .prob-bar-bg { background: var(--border); border-radius: 4px; height: 6px; overflow: hidden; }
+  .prob-bar-fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width 0.6s cubic-bezier(.4,0,.2,1); }
+
+  /* metrics card */
+  .metric-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .metric-row:last-child { border-bottom: none; }
+  .metric-key   { font-size: 11px; color: var(--muted); }
+  .metric-value { font-size: 12px; }
+
+  /* clinical flag */
+  .flag-card {
+    border-left: 3px solid var(--severe);
+    display: none;
+  }
+  .flag-card.show { display: block; }
+  .flag-card.mild-flag { border-left-color: var(--mild); }
+  .flag-text { font-size: 12px; line-height: 1.7; }
+
+  /* full-width heatmap row */
+  .heatmap-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  @media(max-width: 680px) { .heatmap-row { grid-template-columns: 1fr; } }
+
+  .reset-btn {
+    display: block; width: 100%; margin-top: 8px;
+    padding: 13px;
+    background: transparent;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    border: 1px solid var(--border);
+    border-radius: 8px; cursor: pointer;
+    transition: color 0.2s, border-color 0.2s;
+  }
+  .reset-btn:hover { color: var(--text); border-color: var(--muted); }
+
+  /* disclaimer */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 24px 0;
+    text-align: center;
+  }
+  footer p { font-size: 10px; color: var(--muted); line-height: 1.9; max-width: 520px; margin: 0 auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-mark">KeratitisAI</span>
+        <span class="logo-sub">Clinical Vision System</span>
+      </div>
+      <span class="badge">Research Prototype</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <p class="hero-eyebrow">Slit-lamp Image Analysis</p>
+    <h1 class="hero-title">Corneal ulcer<br><em>classified in seconds</em></h1>
+    <p class="hero-desc">
+      Upload a slit-lamp image. The model identifies bacterial, fungal, or viral keratitis,
+      maps attention with GradCAM++, and estimates severity — all in one pass.
+    </p>
+  </section>
+
+  <section class="upload-section" id="uploadSection">
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" accept="image/*"/>
+      <span class="drop-icon">🔬</span>
+      <p class="drop-title">Drop slit-lamp image here</p>
+      <p class="drop-sub">or click to browse — JPG, PNG, WEBP</p>
+    </div>
+
+    <div class="preview-wrap" id="previewWrap">
+      <img id="previewImg" src="" alt="Preview"/>
+      <button class="preview-remove" id="removeBtn">✕</button>
+    </div>
+
+    <button class="btn-analyse" id="analyseBtn" disabled>Analyse image →</button>
+  </section>
+
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <p>Running inference...</p>
+  </div>
+
+  <section class="results" id="results">
+
+    <div class="results-grid">
+
+      <!-- Diagnosis -->
+      <div class="card">
+        <p class="card-label">Diagnosis</p>
+        <p class="diagnosis-name" id="diagName">—</p>
+        <p class="diagnosis-conf" id="diagConf">—</p>
+        <span class="severity-pill" id="severityPill">—</span>
+      </div>
+
+      <!-- Probabilities -->
+      <div class="card">
+        <p class="card-label">Class Probabilities</p>
+        <div id="probBars"></div>
+      </div>
+
+    </div>
+
+    <div class="heatmap-row">
+
+      <!-- Original -->
+      <div class="card">
+        <p class="card-label">Original Image</p>
+        <img id="origImg" src="" alt="Original" style="width:100%;border-radius:6px;"/>
+      </div>
+
+      <!-- GradCAM overlay -->
+      <div class="card">
+        <p class="card-label">GradCAM++ Attention Map</p>
+        <img id="heatmapImg" src="" alt="Heatmap"/>
+      </div>
+
+    </div>
+
+    <div class="results-grid">
+
+      <!-- Metrics -->
+      <div class="card">
+        <p class="card-label">Ulcer Metrics</p>
+        <div class="metric-row">
+          <span class="metric-key">Ulcer area</span>
+          <span class="metric-value" id="metricArea">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-key">Bounding box</span>
+          <span class="metric-value" id="metricBbox">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-key">Severity score</span>
+          <span class="metric-value" id="metricSev">—</span>
+        </div>
+      </div>
+
+      <!-- Clinical flag -->
+      <div class="card flag-card" id="flagCard">
+        <p class="card-label">Clinical Flag</p>
+        <p class="flag-text" id="flagText">—</p>
+      </div>
+
+    </div>
+
+    <button class="reset-btn" id="resetBtn">← Analyse another image</button>
+
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>
+      ⚠ Research prototype only. Not validated for clinical use. Do not use for diagnosis.<br>
+      MobileNetV2 · GradCAM++ · SUSTech-SYSU dataset · 3-class keratitis classification
+    </p>
+  </div>
+</footer>
+
+<script>
+const fileInput   = document.getElementById('fileInput');
+const dropZone    = document.getElementById('dropZone');
+const previewWrap = document.getElementById('previewWrap');
+const previewImg  = document.getElementById('previewImg');
+const removeBtn   = document.getElementById('removeBtn');
+const analyseBtn  = document.getElementById('analyseBtn');
+const loading     = document.getElementById('loading');
+const results     = document.getElementById('results');
+const uploadSec   = document.getElementById('uploadSection');
+
+let selectedFile = null;
+
+// drag-drop
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) setFile(f);
+});
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) setFile(fileInput.files[0]);
+});
+
+function setFile(f) {
+  selectedFile = f;
+  const url = URL.createObjectURL(f);
+  previewImg.src = url;
+  document.getElementById('origImg').src = url;
+  previewWrap.style.display = 'block';
+  analyseBtn.disabled = false;
+}
+
+removeBtn.addEventListener('click', () => {
+  selectedFile = null;
+  previewWrap.style.display = 'none';
+  previewImg.src = '';
+  analyseBtn.disabled = true;
+  fileInput.value = '';
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  results.style.display = 'none';
+  uploadSec.style.display = 'block';
+  removeBtn.click();
+});
+
+analyseBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  uploadSec.style.display = 'none';
+  loading.style.display   = 'block';
+  results.style.display   = 'none';
+
+  const fd = new FormData();
+  fd.append('image', selectedFile);
+
+  try {
+    const res  = await fetch('/predict', { method: 'POST', body: fd });
+    const data = await res.json();
+
+    if (data.error) { alert('Error: ' + data.error); reset(); return; }
+
+    renderResults(data);
+  } catch(e) {
+    alert('Request failed: ' + e.message);
+    reset();
+  }
+});
+
+function reset() {
+  loading.style.display   = 'none';
+  uploadSec.style.display = 'block';
+}
+
+function renderResults(d) {
+  loading.style.display  = 'none';
+  results.style.display  = 'block';
+
+  // diagnosis
+  document.getElementById('diagName').textContent = d.predicted_class;
+  document.getElementById('diagConf').textContent = `Confidence: ${(d.confidence * 100).toFixed(1)}%`;
+
+  // severity pill
+  const pill = document.getElementById('severityPill');
+  pill.textContent = `${d.severity_label}  ·  ${d.severity_score}/3`;
+  pill.className   = `severity-pill ${d.severity_label.toLowerCase()}`;
+
+  // prob bars
+  const bars = document.getElementById('probBars');
+  bars.innerHTML = '';
+  for (const [cls, prob] of Object.entries(d.class_probs)) {
+    const pct = (prob * 100).toFixed(1);
+    bars.innerHTML += `
+      <div class="prob-row">
+        <div class="prob-header"><span>${cls}</span><span>${pct}%</span></div>
+        <div class="prob-bar-bg"><div class="prob-bar-fill" style="width:${pct}%"></div></div>
+      </div>`;
+  }
+
+  // heatmap
+  document.getElementById('heatmapImg').src = `data:image/png;base64,${d.heatmap_b64}`;
+
+  // metrics
+  document.getElementById('metricArea').textContent = `${d.ulcer_area_pct}% of cornea`;
+  document.getElementById('metricBbox').textContent = `(${d.ulcer_bbox.join(', ')})`;
+  document.getElementById('metricSev').textContent  = `${d.severity_label} (${d.severity_score}/3)`;
+
+  // clinical flag
+  const flagCard = document.getElementById('flagCard');
+  const flagText = document.getElementById('flagText');
+  let flag = '', flagClass = '';
+  if (d.severity_score === 3) {
+    flag = '⚠ SEVERE presentation detected. Ulcer covers a large area. Consider urgent ophthalmology referral.';
+    flagClass = '';
+  } else if (d.severity_score === 2) {
+    flag = 'ⓘ Moderate involvement. Monitor closely. Follow up within 48–72 hours recommended.';
+    flagClass = '';
+  } else {
+    flag = '✓ Mild presentation. Routine follow-up advised. Re-evaluate if symptoms worsen.';
+    flagClass = 'mild-flag';
+  }
+  if (d.predicted_class === 'fungal')
+    flag += '\n\nFungal keratitis suspected — antifungal therapy may be indicated.';
+  else if (d.predicted_class === 'bacterial')
+    flag += '\n\nBacterial keratitis suspected — antibiotic therapy may be indicated.';
+
+  flagText.style.whiteSpace = 'pre-line';
+  flagText.textContent = flag;
+  flagCard.className = `card flag-card show ${flagClass}`;
+}
+</script>
+</body>
+</html>
