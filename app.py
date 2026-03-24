@@ -1,5 +1,7 @@
 import os, io, base64, json
 import numpy as np
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
+import cv2
 from PIL import Image
 import torch
 import torch.nn as nn
