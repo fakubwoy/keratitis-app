@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["libGL", "libGLU", "mesa"]
+nixPkgs = ["python312", "python312Packages.pip", "libGL", "libGLU", "mesa"]
