@@ -2,8 +2,9 @@ flask==3.0.3
 flask-cors==4.0.1
 torch==2.3.1
 torchvision==0.18.1
-grad-cam==1.5.0
 Pillow==10.3.0
 numpy==1.26.4
 gunicorn==22.0.0
 openpyxl==3.1.5
+grad-cam==1.5.0
+opencv-python-headless==4.9.0.80
