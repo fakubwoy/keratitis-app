@@ -1,4 +1,4 @@
-import os, io, base64, json
+import os, io, base64, json, gc, threading, time
 import numpy as np
 from PIL import Image
 import torch
@@ -23,14 +23,47 @@ NUM_CLASSES = len(CLASS_NAMES)
 DEVICE      = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MODEL_PATH  = os.environ.get('MODEL_PATH', 'keratitis_model_final.pth')
 
-# ── Load model ────────────────────────────────────────────────────────────────
-# The checkpoint was trained with a custom two-layer head:
-#   classifier.0  Dropout
-#   classifier.1  Linear(1280 → 256)
-#   classifier.2  ReLU
-#   classifier.3  Dropout
-#   classifier.4  Linear(256 → num_classes)
-def build_mobilenet(num_classes, hidden=256, dropout=0.2):
+# How many seconds of inactivity before the model is evicted from memory.
+# Override via env var: MODEL_IDLE_TIMEOUT=300
+IDLE_TIMEOUT = int(os.environ.get('MODEL_IDLE_TIMEOUT', 300))   # default 5 min
+
+# ── Model manager (lazy load + idle eviction) ─────────────────────────────────
+_model_lock      = threading.Lock()
+_classifier      = None          # live model, or None when evicted
+_last_used_at    = 0.0           # epoch-seconds of last request
+_eviction_timer  = None          # background Timer handle
+
+
+def _free_model():
+    """Drop the model and reclaim memory. Called from the eviction timer."""
+    global _classifier, _last_used_at, _eviction_timer
+    with _model_lock:
+        if _classifier is None:
+            return
+        # Only evict if we have truly been idle long enough
+        if time.time() - _last_used_at < IDLE_TIMEOUT:
+            _reschedule_eviction()
+            return
+        _classifier = None
+        _eviction_timer = None
+    # Release memory outside the lock so we don't hold it during GC
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print(f"[INFO] Model evicted after {IDLE_TIMEOUT}s of inactivity — memory freed.")
+
+
+def _reschedule_eviction():
+    """(Re)start the idle eviction timer. Must be called while holding _model_lock."""
+    global _eviction_timer
+    if _eviction_timer is not None:
+        _eviction_timer.cancel()
+    _eviction_timer = threading.Timer(IDLE_TIMEOUT, _free_model)
+    _eviction_timer.daemon = True
+    _eviction_timer.start()
+
+
+def _build_mobilenet(num_classes, hidden=256, dropout=0.2):
     m = models.mobilenet_v2(weights=None)
     m.classifier = nn.Sequential(
         nn.Dropout(p=dropout),
@@ -41,25 +74,40 @@ def build_mobilenet(num_classes, hidden=256, dropout=0.2):
     )
     return m
 
-ckpt = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
-if 'model_state_dict' in ckpt:
-    state_dict = ckpt['model_state_dict']
-else:
-    state_dict = ckpt
 
-# Auto-infer hidden size and num_classes directly from checkpoint weights
-hidden_size      = state_dict['classifier.1.weight'].shape[0]   # 256
-num_classes_ckpt = state_dict['classifier.4.weight'].shape[0]   # 3
+def _load_model():
+    """Load checkpoint from disk and return a ready model. No side-effects."""
+    ckpt = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
+    state_dict = ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt
 
-classifier = build_mobilenet(num_classes_ckpt, hidden=hidden_size)
-classifier.load_state_dict(state_dict)
+    hidden_size      = state_dict['classifier.1.weight'].shape[0]
+    num_classes_ckpt = state_dict['classifier.4.weight'].shape[0]
+    assert num_classes_ckpt == NUM_CLASSES, (
+        f"Checkpoint has {num_classes_ckpt} classes but CLASS_NAMES has {NUM_CLASSES}"
+    )
 
-# Keep our human-readable names; sanity-check count matches
-assert num_classes_ckpt == NUM_CLASSES, \
-    f"Checkpoint has {num_classes_ckpt} classes but CLASS_NAMES has {NUM_CLASSES}"
+    model = _build_mobilenet(num_classes_ckpt, hidden=hidden_size)
+    model.load_state_dict(state_dict)
+    model.to(DEVICE).eval()
+    print(f"[INFO] Model loaded — classes: {CLASS_NAMES}, device: {DEVICE}")
+    return model
 
-classifier.to(DEVICE).eval()
-print(f"[INFO] Model loaded — classes: {CLASS_NAMES}, device: {DEVICE}")
+
+def get_classifier():
+    """
+    Return the live model, loading it from disk if it was evicted.
+    Resets the idle eviction timer on every call.
+    Thread-safe.
+    """
+    global _classifier, _last_used_at
+    with _model_lock:
+        _last_used_at = time.time()
+        if _classifier is None:
+            print("[INFO] Model not in memory — loading from disk …")
+            _classifier = _load_model()
+        _reschedule_eviction()
+        return _classifier
+
 
 # ── GradCAM++ (pure PyTorch, no opencv) ───────────────────────────────────────
 def gradcam_plusplus(model, tensor, target_idx):
@@ -88,25 +136,23 @@ def gradcam_plusplus(model, tensor, target_idx):
     dY = grads['act'][0]             # (C, H, W)
 
     # GradCAM++ alpha weights
-    dY2 = dY ** 2
-    dY3 = dY ** 3
+    dY2   = dY ** 2
+    dY3   = dY ** 3
     sum_A = A.sum(dim=(1, 2), keepdim=True)
     alpha = dY2 / (2 * dY2 + sum_A * dY3 + 1e-7)
     alpha = torch.where(dY > 0, alpha, torch.zeros_like(alpha))
 
     weights = (alpha * F.relu(dY)).sum(dim=(1, 2))   # (C,)
-    cam = (weights[:, None, None] * A).sum(dim=0)     # (H, W)
-    cam = F.relu(cam)
+    cam     = (weights[:, None, None] * A).sum(dim=0) # (H, W)
+    cam     = F.relu(cam)
 
-    # Normalise to [0, 1]
     cam = cam - cam.min()
     cam = cam / (cam.max() + 1e-7)
 
-    # Upsample to IMG_SIZE x IMG_SIZE
     cam_up = F.interpolate(
         cam.unsqueeze(0).unsqueeze(0),
         size=(IMG_SIZE, IMG_SIZE),
-        mode='bilinear', align_corners=False
+        mode='bilinear', align_corners=False,
     )[0, 0]
 
     return cam_up.detach().cpu().numpy()
@@ -114,7 +160,6 @@ def gradcam_plusplus(model, tensor, target_idx):
 
 def apply_heatmap(rgb_np, cam):
     """Overlay jet colormap heatmap on rgb image (both float32 [0,1])."""
-    # Jet colormap approximation using pure numpy
     r = np.clip(1.5 - np.abs(4 * cam - 3), 0, 1)
     g = np.clip(1.5 - np.abs(4 * cam - 2), 0, 1)
     b = np.clip(1.5 - np.abs(4 * cam - 1), 0, 1)
@@ -133,6 +178,8 @@ val_tfm = T.Compose([
 
 # ── Inference ─────────────────────────────────────────────────────────────────
 def predict(pil_img, threshold=0.45):
+    classifier = get_classifier()          # lazy-load + reset idle timer
+
     pil_img = pil_img.convert('RGB').resize((IMG_SIZE, IMG_SIZE))
     raw_np  = np.array(pil_img) / 255.0
     tensor  = val_tfm(pil_img).unsqueeze(0).to(DEVICE)
@@ -147,7 +194,7 @@ def predict(pil_img, threshold=0.45):
     class_probs = {CLASS_NAMES[i]: round(float(probs[i]), 4) for i in range(NUM_CLASSES)}
 
     # GradCAM++ (needs grad)
-    tensor2 = val_tfm(pil_img).unsqueeze(0).to(DEVICE)
+    tensor2       = val_tfm(pil_img).unsqueeze(0).to(DEVICE)
     grayscale_cam = gradcam_plusplus(classifier, tensor2, pred_idx)
 
     overlay = apply_heatmap(raw_np.astype(np.float32), grayscale_cam)
@@ -159,10 +206,10 @@ def predict(pil_img, threshold=0.45):
         y1, y2 = int(coords[0].min()), int(coords[0].max())
         x1, x2 = int(coords[1].min()), int(coords[1].max())
         pad  = 10
-        bbox = (max(0,x1-pad), max(0,y1-pad),
-                min(IMG_SIZE-1,x2+pad), min(IMG_SIZE-1,y2+pad))
+        bbox = (max(0, x1 - pad), max(0, y1 - pad),
+                min(IMG_SIZE - 1, x2 + pad), min(IMG_SIZE - 1, y2 + pad))
     else:
-        bbox = (0, 0, IMG_SIZE-1, IMG_SIZE-1)
+        bbox = (0, 0, IMG_SIZE - 1, IMG_SIZE - 1)
 
     ulcer_area_pct = float(mask.sum()) / (IMG_SIZE * IMG_SIZE) * 100
 
@@ -173,21 +220,20 @@ def predict(pil_img, threshold=0.45):
     else:
         severity_label, severity_score = 'Severe', 3
 
-    # Encode overlay as base64
     overlay_pil = Image.fromarray(overlay)
     buf = io.BytesIO()
     overlay_pil.save(buf, format='PNG')
     overlay_b64 = base64.b64encode(buf.getvalue()).decode()
 
     return {
-        'predicted_class' : CLASS_NAMES[pred_idx],
-        'confidence'      : round(confidence, 4),
-        'class_probs'     : class_probs,
-        'heatmap_b64'     : overlay_b64,
-        'ulcer_bbox'      : bbox,
-        'ulcer_area_pct'  : round(ulcer_area_pct, 2),
-        'severity_label'  : severity_label,
-        'severity_score'  : severity_score,
+        'predicted_class': CLASS_NAMES[pred_idx],
+        'confidence'     : round(confidence, 4),
+        'class_probs'    : class_probs,
+        'heatmap_b64'    : overlay_b64,
+        'ulcer_bbox'     : bbox,
+        'ulcer_area_pct' : round(ulcer_area_pct, 2),
+        'severity_label' : severity_label,
+        'severity_score' : severity_score,
     }
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -209,7 +255,17 @@ def predict_route():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'device': str(DEVICE), 'classes': CLASS_NAMES})
+    with _model_lock:
+        model_in_memory = _classifier is not None
+        idle_for = round(time.time() - _last_used_at, 1) if _last_used_at else None
+    return jsonify({
+        'status'         : 'ok',
+        'device'         : str(DEVICE),
+        'classes'        : CLASS_NAMES,
+        'model_in_memory': model_in_memory,
+        'idle_seconds'   : idle_for,
+        'idle_timeout'   : IDLE_TIMEOUT,
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
